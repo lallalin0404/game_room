@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>打磚塊</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    canvas { background: #0c0f1e; border-radius: 12px; display: block; touch-action: none; }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <button class="btn btn-primary" id="startBtn">開始</button>
+      <span class="status">分數 <b id="score">0</b></span>
+      <span class="status">生命 <b id="lives">3</b></span>
+      <span class="status">最高 <b id="best">0</b></span>
+    </div>
+    <div class="game-stage" style="flex-direction:column; align-items:center;">
+      <canvas id="cv" width="600" height="650"></canvas>
+    </div>
+    <div class="hint">滑鼠移動 / 方向鍵 ← → 控制球拍，把所有磚塊打光。手機可用手指拖曳。</div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("🧊 打磚塊");
+
+    const cv = document.getElementById("cv");
+    const ctx = cv.getContext("2d");
+    const W = cv.width, H = cv.height;
+
+    const BRICK_ROWS = 6, BRICK_COLS = 9;
+    const BRICK_W = 58, BRICK_H = 22, BRICK_GAP = 5, BRICK_TOP = 60, BRICK_LEFT = 19;
+    const COLORS = ["#ff5c7c", "#ffb84d", "#4dd07c", "#23d5ab", "#6ea8ff", "#b48cff"];
+
+    let paddle, ball, bricks, score, lives, running, raf;
+    const scoreEl = document.getElementById("score");
+    const livesEl = document.getElementById("lives");
+    const bestEl = document.getElementById("best");
+    bestEl.textContent = Scores.getBest("breakout") ?? 0;
+
+    function resetBricks() {
+      bricks = [];
+      for (let r = 0; r < BRICK_ROWS; r++)
+        for (let c = 0; c < BRICK_COLS; c++)
+          bricks.push({
+            x: BRICK_LEFT + c * (BRICK_W + BRICK_GAP),
+            y: BRICK_TOP + r * (BRICK_H + BRICK_GAP),
+            alive: true,
+            color: COLORS[r % COLORS.length],
+          });
+    }
+
+    function resetBall() {
+      ball = { x: W / 2, y: H - 60, r: 8, dx: 3 * (Math.random() < 0.5 ? 1 : -1), dy: -4 };
+      paddle = { x: W / 2 - 45, y: H - 24, w: 90, h: 12 };
+    }
+
+    function newGame() {
+      score = 0; lives = 3;
+      scoreEl.textContent = 0; livesEl.textContent = 3;
+      resetBricks(); resetBall();
+      running = true;
+      cancelAnimationFrame(raf);
+      loop();
+    }
+
+    function launch() {
+      if (!running) newGame();
+    }
+
+    function loop() {
+      if (!running) return;
+      update();
+      draw();
+      raf = requestAnimationFrame(loop);
+    }
+
+    function update() {
+      ball.x += ball.dx;
+      ball.y += ball.dy;
+      // 牆
+      if (ball.x - ball.r < 0) { ball.x = ball.r; ball.dx *= -1; }
+      if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.dx *= -1; }
+      if (ball.y - ball.r < 0) { ball.y = ball.r; ball.dy *= -1; }
+      // 掉出底部
+      if (ball.y - ball.r > H) {
+        lives--;
+        livesEl.textContent = lives;
+        if (lives <= 0) { endGame(); return; }
+        resetBall();
+        return;
+      }
+      // 球拍
+      if (ball.y + ball.r >= paddle.y && ball.y + ball.r <= paddle.y + paddle.h + 8 &&
+          ball.x >= paddle.x && ball.x <= paddle.x + paddle.w && ball.dy > 0) {
+        const hit = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2); // -1..1
+        const speed = Math.hypot(ball.dx, ball.dy);
+        const angle = hit * (Math.PI / 3); // 最多 60 度
+        ball.dx = speed * Math.sin(angle);
+        ball.dy = -Math.abs(speed * Math.cos(angle));
+      }
+      // 磚塊
+      for (const b of bricks) {
+        if (!b.alive) continue;
+        if (ball.x + ball.r > b.x && ball.x - ball.r < b.x + BRICK_W &&
+            ball.y + ball.r > b.y && ball.y - ball.r < b.y + BRICK_H) {
+          b.alive = false;
+          score += 10;
+          scoreEl.textContent = score;
+          // 判斷從上下或左右撞擊
+          const overlapX = Math.min(ball.x + ball.r - b.x, b.x + BRICK_W - (ball.x - ball.r));
+          const overlapY = Math.min(ball.y + ball.r - b.y, b.y + BRICK_H - (ball.y - ball.r));
+          if (overlapX < overlapY) ball.dx *= -1; else ball.dy *= -1;
+          break;
+        }
+      }
+      if (bricks.every((b) => !b.alive)) { win(); }
+    }
+
+    function draw() {
+      ctx.fillStyle = "#0c0f1e";
+      ctx.fillRect(0, 0, W, H);
+      // 磚塊
+      bricks.forEach((b) => {
+        if (!b.alive) return;
+        ctx.fillStyle = b.color;
+        ctx.fillRect(b.x, b.y, BRICK_W, BRICK_H);
+      });
+      // 球拍
+      ctx.fillStyle = "#e8eaf6";
+      ctx.fillRect(paddle.x, paddle.y, paddle.w, paddle.h);
+      // 球
+      ctx.beginPath();
+      ctx.fillStyle = "#23d5ab";
+      ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function win() {
+      running = false;
+      const isBest = Scores.submit("breakout", score, "max");
+      bestEl.textContent = Scores.getBest("breakout");
+      showOverlay({ title: "🎉 全破！", message: `分數 ${score}${isBest ? "・新紀錄！" : ""}`, buttonText: "再玩一次", onButton: newGame });
+    }
+
+    function endGame() {
+      running = false;
+      const isBest = Scores.submit("breakout", score, "max");
+      bestEl.textContent = Scores.getBest("breakout");
+      showOverlay({ title: "💥 遊戲結束", message: `分數 ${score}${isBest ? "・新紀錄！" : ""}`, buttonText: "再玩一次", onButton: newGame });
+    }
+
+    function movePaddleTo(px) {
+      paddle.x = Math.max(0, Math.min(W - paddle.w, px - paddle.w / 2));
+    }
+
+    cv.addEventListener("mousemove", (e) => {
+      const rect = cv.getBoundingClientRect();
+      movePaddleTo(e.clientX - rect.left);
+    });
+    cv.addEventListener("touchmove", (e) => {
+      const rect = cv.getBoundingClientRect();
+      movePaddleTo(e.touches[0].clientX - rect.left);
+      e.preventDefault();
+    }, { passive: false });
+    document.addEventListener("keydown", (e) => {
+      if (!paddle) return;
+      if (e.key === "ArrowLeft") movePaddleTo(paddle.x + paddle.w / 2 - 24);
+      else if (e.key === "ArrowRight") movePaddleTo(paddle.x + paddle.w / 2 + 24);
+    });
+
+    document.getElementById("startBtn").addEventListener("click", newGame);
+
+    // 初始靜態畫面
+    resetBricks(); resetBall();
+    draw();
+  </script>
+</body>
+</html>

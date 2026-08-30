@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>數格子</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    .ng-wrap { display: inline-block; }
+    table.ng { border-collapse: collapse; user-select: none; }
+    table.ng td { padding: 0; text-align: center; vertical-align: middle; }
+    .corner { }
+    .colhint {
+      vertical-align: bottom;
+      font-size: 12px; line-height: 1.25; color: var(--text-dim);
+      padding-bottom: 4px !important; min-width: 30px;
+      font-variant-numeric: tabular-nums;
+    }
+    .colhint div.done { color: var(--good); }
+    .rowhint {
+      text-align: right !important; font-size: 13px; color: var(--text-dim);
+      padding-right: 8px !important; white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .rowhint.done { color: var(--good); }
+    .cell {
+      width: 38px; height: 38px; border: 1px solid var(--border);
+      background: var(--bg-soft); cursor: pointer;
+    }
+    .cell.fill { background: var(--accent); }
+    .cell.cross { position: relative; }
+    .cell.cross::after {
+      content: "✕"; color: var(--text-dim); font-size: 18px;
+      display: grid; place-items: center; height: 100%;
+    }
+    /* 點錯（塗到不該塗的格）的提示：短暫閃紅 */
+    .cell.wrong {
+      background: var(--danger);
+      animation: ngWrong 0.5s ease;
+    }
+    @keyframes ngWrong {
+      0% { background: var(--danger); }
+      100% { background: var(--danger); }
+    }
+    /* 每 5 格加粗線 */
+    .cell.b-left { border-left: 2px solid var(--text-dim); }
+    .cell.b-top { border-top: 2px solid var(--text-dim); }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <label>大小
+        <select id="size">
+          <option value="5">5 × 5</option>
+          <option value="10" selected>10 × 10</option>
+          <option value="15">15 × 15</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newBtn">新謎題</button>
+      <button class="btn" id="clearBtn">清空</button>
+      <span class="status">失誤 <b id="mistakes">0</b></span>
+    </div>
+    <div class="game-stage">
+      <div class="ng-wrap"><table class="ng" id="board"></table></div>
+    </div>
+    <div class="hint">
+      每行/列的數字代表「連續著色的格子數」。例如「1 13」＝先 1 格著色、隔開、再 13 格著色。<br />
+      左鍵塗色，右鍵標 ✕（確定是空白）。完成正確圖案就過關。
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("🎨 數格子");
+
+    let N, sol, state, rowHints, colHints; // state: 0 空, 1 填, 2 叉
+    let mistakes = 0;
+    const boardEl = document.getElementById("board");
+
+    function makeSolution(n) {
+      // 隨機圖案，密度約 55%，確保每行每列至少一格
+      const g = Array.from({ length: n }, () => Array.from({ length: n }, () => (Math.random() < 0.55 ? 1 : 0)));
+      for (let r = 0; r < n; r++) if (g[r].every((v) => !v)) g[r][randInt(0, n - 1)] = 1;
+      for (let c = 0; c < n; c++) {
+        let any = false;
+        for (let r = 0; r < n; r++) if (g[r][c]) any = true;
+        if (!any) g[randInt(0, n - 1)][c] = 1;
+      }
+      return g;
+    }
+
+    function lineHints(arr) {
+      const hints = [];
+      let run = 0;
+      for (const v of arr) {
+        if (v) run++;
+        else if (run) { hints.push(run); run = 0; }
+      }
+      if (run) hints.push(run);
+      return hints.length ? hints : [0];
+    }
+
+    function buildHints() {
+      rowHints = [];
+      colHints = [];
+      for (let r = 0; r < N; r++) rowHints.push(lineHints(sol[r]));
+      for (let c = 0; c < N; c++) {
+        const col = [];
+        for (let r = 0; r < N; r++) col.push(sol[r][c]);
+        colHints.push(lineHints(col));
+      }
+    }
+
+    function newGame() {
+      N = Number(document.getElementById("size").value);
+      sol = makeSolution(N);
+      buildHints();
+      state = Array.from({ length: N }, () => Array(N).fill(0));
+      mistakes = 0;
+      document.getElementById("mistakes").textContent = 0;
+      render();
+    }
+
+    function lineSatisfied(cells, hint) {
+      // cells: 0/1/2 -> 用 filled 判斷
+      const filled = cells.map((v) => (v === 1 ? 1 : 0));
+      return JSON.stringify(lineHints(filled)) === JSON.stringify(hint);
+    }
+
+    function checkWin() {
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++) {
+          const filled = state[r][c] === 1;
+          if (filled !== !!sol[r][c]) return false;
+        }
+      return true;
+    }
+
+    function render() {
+      boardEl.innerHTML = "";
+      const maxColHint = Math.max(...colHints.map((h) => h.length));
+
+      // 欄提示區（多列）
+      for (let hr = 0; hr < maxColHint; hr++) {
+        const tr = document.createElement("tr");
+        const corner = document.createElement("td");
+        corner.className = "corner";
+        tr.appendChild(corner);
+        for (let c = 0; c < N; c++) {
+          const td = document.createElement("td");
+          td.className = "colhint";
+          const h = colHints[c];
+          const offset = maxColHint - h.length;
+          if (hr >= offset) {
+            const d = document.createElement("div");
+            d.textContent = h[hr - offset];
+            td.appendChild(d);
+          }
+          tr.appendChild(td);
+        }
+        boardEl.appendChild(tr);
+      }
+
+      // 各列
+      for (let r = 0; r < N; r++) {
+        const tr = document.createElement("tr");
+        const rh = document.createElement("td");
+        rh.className = "rowhint";
+        // 檢查該列是否符合
+        const cellsR = state[r].slice();
+        if (lineSatisfied(cellsR, rowHints[r])) rh.classList.add("done");
+        rh.textContent = rowHints[r].join(" ");
+        tr.appendChild(rh);
+
+        for (let c = 0; c < N; c++) {
+          const td = document.createElement("td");
+          const cell = document.createElement("div");
+          cell.className = "cell";
+          if (c % 5 === 0 && c !== 0) cell.classList.add("b-left");
+          if (r % 5 === 0 && r !== 0) cell.classList.add("b-top");
+          if (state[r][c] === 1) cell.classList.add("fill");
+          else if (state[r][c] === 2) cell.classList.add("cross");
+          cell.addEventListener("click", () => { toggle(r, c, 1); });
+          cell.addEventListener("contextmenu", (e) => { e.preventDefault(); toggle(r, c, 2); });
+          td.appendChild(cell);
+          tr.appendChild(td);
+        }
+        boardEl.appendChild(tr);
+      }
+    }
+
+    function toggle(r, c, kind) {
+      const wasFilling = state[r][c] !== kind && kind === 1;
+      state[r][c] = state[r][c] === kind ? 0 : kind;
+      // 點錯提醒：塗色到不該塗的格
+      if (wasFilling && state[r][c] === 1 && !sol[r][c]) {
+        mistakes++;
+        document.getElementById("mistakes").textContent = mistakes;
+        render();
+        // 該格閃紅提示，並自動退回空白
+        const idx = r * N + c;
+        const cellEl = boardEl.querySelectorAll(".cell")[idx];
+        if (cellEl) cellEl.classList.add("wrong");
+        toast("✕ 這格不該塗色", 1200);
+        setTimeout(() => { state[r][c] = 0; render(); }, 450);
+        return;
+      }
+      render();
+      if (checkWin()) {
+        showOverlay({ title: "🎉 完成！", message: `${N} × ${N} 圖案正確・失誤 ${mistakes} 次`, buttonText: "下一題", onButton: newGame });
+      }
+    }
+
+    document.getElementById("newBtn").addEventListener("click", newGame);
+    document.getElementById("size").addEventListener("change", newGame);
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      state = Array.from({ length: N }, () => Array(N).fill(0));
+      render();
+    });
+
+    newGame();
+  </script>
+</body>
+</html>

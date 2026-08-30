@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Queens</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    .q-board {
+      display: grid;
+      gap: 0;
+      background: #6b5648;
+      padding: 3px;
+      border-radius: 8px;
+      border: 3px solid #6b5648;
+      user-select: none;
+    }
+    .q-cell {
+      width: 62px; height: 62px;
+      display: grid; place-items: center;
+      font-size: 32px; cursor: pointer;
+      position: relative;
+      /* 加深格線，避免融入黃色區域顏色 */
+      box-shadow: inset 0 0 0 1px rgba(80, 60, 45, 0.55);
+    }
+    .q-cell.conflict::after {
+      content: ""; position: absolute; inset: 0;
+      box-shadow: inset 0 0 0 3px var(--danger);
+    }
+    .q-cell .mark { pointer-events: none; }
+    .q-cell .mark.auto { opacity: 0.4; font-size: 24px; }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <label>盤面
+        <select id="size">
+          <option value="6">6 × 6</option>
+          <option value="7">7 × 7</option>
+          <option value="8" selected>8 × 8</option>
+          <option value="9">9 × 9</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newBtn">新謎題</button>
+      <button class="btn" id="clearBtn">清空</button>
+      <span class="status" id="msg">放下 <b id="placed">0</b> 個皇冠</span>
+    </div>
+    <div class="game-stage">
+      <div class="q-board" id="board"></div>
+    </div>
+    <div class="hint">
+      規則：每一行、每一列、每個顏色區域都<b>剛好一個皇冠 👑</b>，且任兩個皇冠<b>不能相鄰</b>（含斜角）。<br />
+      點一下標記 ✕（排除），再點一下放皇冠 👑，第三下清除。
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("👑 Queens");
+
+    const PALETTE = ["#ff7a59", "#ffb27a", "#ffd36e", "#7ec6a2", "#6ea8ff", "#c98cff", "#ff8fb0", "#8fd3c7", "#ffa94d"];
+
+    let N, regions, solution, state; // state[r][c]: 0 空, 1 排除✕, 2 皇冠👑
+    let autoCross;                    // autoCross[r][c]: 有幾個皇冠自動在此打叉（>0 顯示淡叉）
+    const boardEl = document.getElementById("board");
+
+    // 回傳某皇冠會自動打叉的格子（同行、同列、相鄰含斜角、同顏色區）
+    function crossTargets(qr, qc) {
+      const targets = [];
+      const region = regions[qr][qc];
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++) {
+          if (r === qr && c === qc) continue;
+          const sameLine = r === qr || c === qc;
+          const adjacent = Math.abs(r - qr) <= 1 && Math.abs(c - qc) <= 1;
+          const sameRegion = regions[r][c] === region;
+          if (sameLine || adjacent || sameRegion) targets.push([r, c]);
+        }
+      return targets;
+    }
+
+    function applyAutoCross(qr, qc, delta) {
+      crossTargets(qr, qc).forEach(([r, c]) => {
+        autoCross[r][c] = Math.max(0, autoCross[r][c] + delta);
+      });
+    }
+
+    // ---- 產生一個合法解：每行一個皇冠、不同列、互不相鄰 ----
+    function genSolution(n) {
+      // 回溯法尋找放置方式：queen[r] = 該列的 col
+      const cols = [];
+      function ok(r, c) {
+        for (let pr = 0; pr < r; pr++) {
+          const pc = cols[pr];
+          if (pc === c) return false;
+          // 不相鄰（含斜角）：相鄰列時，欄差不可 <=1
+          if (r - pr === 1 && Math.abs(pc - c) <= 1) return false;
+        }
+        return true;
+      }
+      function solve(r) {
+        if (r === n) return true;
+        for (const c of shuffle([...Array(n).keys()])) {
+          if (ok(r, c)) {
+            cols[r] = c;
+            if (solve(r + 1)) return true;
+          }
+        }
+        return false;
+      }
+      solve(0);
+      return cols; // 陣列：每列的皇冠欄位
+    }
+
+    // ---- 根據解答，把盤面切成 N 個相連顏色區，每區剛好含一個皇冠 ----
+    function genRegions(n, queenCols) {
+      const region = Array.from({ length: n }, () => Array(n).fill(-1));
+      // 種子：每個皇冠是一個區域的起點
+      const seeds = [];
+      for (let r = 0; r < n; r++) { region[r][queenCols[r]] = r; seeds.push([r, queenCols[r]]); }
+      // 用隨機 flood 擴張，直到填滿
+      let remaining = n * n - n;
+      const frontier = seeds.map(([r, c]) => ({ r, c, id: region[r][c] }));
+      while (remaining > 0) {
+        // 隨機挑一個 frontier 格，往未指派的鄰格擴張
+        const idx = randInt(0, frontier.length - 1);
+        const { id } = frontier[idx];
+        // 找該區域所有邊界可擴張格
+        const options = [];
+        for (let r = 0; r < n; r++)
+          for (let c = 0; c < n; c++)
+            if (region[r][c] === id) {
+              for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+                const nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < n && nc >= 0 && nc < n && region[nr][nc] === -1)
+                  options.push([nr, nc]);
+              }
+            }
+        if (options.length === 0) { frontier.splice(idx, 1); if (frontier.length === 0) break; continue; }
+        const [gr, gc] = options[randInt(0, options.length - 1)];
+        region[gr][gc] = id;
+        frontier.push({ r: gr, c: gc, id });
+        remaining--;
+      }
+      // 若有殘留 -1（極少見），指派給任一相鄰區
+      for (let r = 0; r < n; r++)
+        for (let c = 0; c < n; c++)
+          if (region[r][c] === -1) {
+            for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+              const nr = r + dr, nc = c + dc;
+              if (nr >= 0 && nr < n && nc >= 0 && nc < n && region[nr][nc] !== -1) { region[r][c] = region[nr][nc]; break; }
+            }
+            if (region[r][c] === -1) region[r][c] = 0;
+          }
+      return region;
+    }
+
+    function newGame() {
+      N = Number(document.getElementById("size").value);
+      const cols = genSolution(N);
+      regions = genRegions(N, cols);
+      solution = Array.from({ length: N }, (_, r) => Array.from({ length: N }, (_, c) => cols[r] === c));
+      state = Array.from({ length: N }, () => Array(N).fill(0));
+      autoCross = Array.from({ length: N }, () => Array(N).fill(0));
+      render();
+    }
+
+    function cycle(r, c) {
+      const prev = state[r][c];
+      const next = (prev + 1) % 3;
+      // 放下皇冠 → 自動在相關格子打叉；取消皇冠 → 收回這些叉
+      if (prev === 2) applyAutoCross(r, c, -1);
+      state[r][c] = next;
+      if (next === 2) applyAutoCross(r, c, +1);
+      render();
+      checkWin();
+    }
+
+    function conflicts() {
+      const conf = Array.from({ length: N }, () => Array(N).fill(false));
+      const queens = [];
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++)
+          if (state[r][c] === 2) queens.push([r, c]);
+      // 行、列重複
+      for (let i = 0; i < queens.length; i++) {
+        for (let j = i + 1; j < queens.length; j++) {
+          const [r1, c1] = queens[i], [r2, c2] = queens[j];
+          if (r1 === r2 || c1 === c2 || regions[r1][c1] === regions[r2][c2] ||
+              (Math.abs(r1 - r2) <= 1 && Math.abs(c1 - c2) <= 1)) {
+            conf[r1][c1] = true; conf[r2][c2] = true;
+          }
+        }
+      }
+      return conf;
+    }
+
+    function checkWin() {
+      let count = 0;
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++)
+          if (state[r][c] === 2) count++;
+      if (count !== N) return;
+      const conf = conflicts();
+      const anyConf = conf.some((row) => row.some((v) => v));
+      // 每區也要剛好一個
+      const perRegion = Array(N).fill(0);
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++)
+          if (state[r][c] === 2) perRegion[regions[r][c]]++;
+      const regionOk = perRegion.every((v) => v === 1);
+      if (!anyConf && regionOk) {
+        showOverlay({ title: "🎉 解開了！", message: `${N} × ${N} 完成`, buttonText: "下一題", onButton: newGame });
+      }
+    }
+
+    function render() {
+      boardEl.style.gridTemplateColumns = `repeat(${N}, 62px)`;
+      boardEl.innerHTML = "";
+      const conf = conflicts();
+      let placed = 0;
+      for (let r = 0; r < N; r++) {
+        for (let c = 0; c < N; c++) {
+          if (state[r][c] === 2) placed++;
+          const el = document.createElement("div");
+          el.className = "q-cell";
+          el.style.background = PALETTE[regions[r][c] % PALETTE.length];
+          if (state[r][c] === 2) el.innerHTML = '<span class="mark">👑</span>';
+          else if (state[r][c] === 1) el.innerHTML = '<span class="mark">✕</span>';
+          else if (autoCross[r][c] > 0) el.innerHTML = '<span class="mark auto">✕</span>';
+          if (conf[r][c]) el.classList.add("conflict");
+          el.addEventListener("click", () => cycle(r, c));
+          boardEl.appendChild(el);
+        }
+      }
+      document.getElementById("placed").textContent = placed;
+    }
+
+    document.getElementById("newBtn").addEventListener("click", newGame);
+    document.getElementById("size").addEventListener("change", newGame);
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      state = Array.from({ length: N }, () => Array(N).fill(0));
+      autoCross = Array.from({ length: N }, () => Array(N).fill(0));
+      render();
+    });
+
+    newGame();
+  </script>
+</body>
+</html>

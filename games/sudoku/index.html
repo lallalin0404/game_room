@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>數獨</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    .sdk-board {
+      display: grid;
+      grid-template-columns: repeat(9, 56px);
+      grid-template-rows: repeat(9, 56px);
+      background: var(--text-dim);
+      gap: 1px;
+      border: 3px solid var(--text-dim);
+      border-radius: 6px;
+    }
+    .sdk-cell {
+      background: #fff;
+      display: grid;
+      place-items: center;
+      font-size: 26px;
+      font-weight: 600;
+      cursor: pointer;
+      position: relative;
+    }
+    .sdk-cell.given { color: var(--text); font-weight: 800; }
+    .sdk-cell.user { color: var(--accent); font-weight: 700; }
+    /* 淺色高亮，數字依然清楚可讀 */
+    .sdk-cell.peer { background: #fff2ea; }
+    .sdk-cell.same { background: #ffd9b8; }
+    .sdk-cell.sel { background: #ffbf8f; }
+    .sdk-cell.bad { color: var(--danger); }
+    /* 3x3 粗框 */
+    .sdk-cell:nth-child(3n) { border-right: 2px solid var(--text-dim); }
+    .sdk-cell:nth-child(9n) { border-right: none; }
+    .sdk-board { position: relative; }
+    .rowsep { border-bottom: 2px solid var(--text-dim); }
+    .numpad {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      margin-top: 22px;
+      width: 100%;
+      max-width: 560px;
+    }
+    .numpad button {
+      padding: 20px 0;
+      font-size: 26px;
+      font-weight: 800;
+    }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <label>難度
+        <select id="level">
+          <option value="40">簡單</option>
+          <option value="48" selected>中等</option>
+          <option value="54">困難</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newBtn">新遊戲</button>
+      <button class="btn" id="checkBtn">檢查</button>
+      <button class="btn" id="solveBtn">顯示答案</button>
+      <span class="status">⏱ <b id="timer">00:00</b></span>
+    </div>
+    <div class="game-stage" style="flex-direction:column; align-items:center;">
+      <div class="sdk-board" id="board"></div>
+      <div class="numpad" id="numpad"></div>
+    </div>
+    <div class="hint">點格子後用數字鍵盤或鍵盤 1–9 輸入，按 0 / Backspace 清除。</div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("🔢 數獨");
+
+    let puzzle = [];   // 題目（0 = 空）
+    let solution = []; // 解答
+    let user = [];     // 玩家填入
+    let given = [];    // 是否為題目給定
+    let sel = -1;
+    let timer = 0, timerId = null;
+    let solved = false;
+
+    const boardEl = document.getElementById("board");
+    const timerEl = document.getElementById("timer");
+
+    // ---- 產生數獨 ----
+    function makeEmpty() { return Array.from({ length: 9 }, () => Array(9).fill(0)); }
+
+    function canPlace(g, r, c, n) {
+      for (let i = 0; i < 9; i++) {
+        if (g[r][i] === n || g[i][c] === n) return false;
+      }
+      const br = Math.floor(r / 3) * 3, bc = Math.floor(c / 3) * 3;
+      for (let dr = 0; dr < 3; dr++)
+        for (let dc = 0; dc < 3; dc++)
+          if (g[br + dr][bc + dc] === n) return false;
+      return true;
+    }
+
+    function fillGrid(g) {
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (g[r][c] === 0) {
+            const nums = shuffle([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            for (const n of nums) {
+              if (canPlace(g, r, c, n)) {
+                g[r][c] = n;
+                if (fillGrid(g)) return true;
+                g[r][c] = 0;
+              }
+            }
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    function countSolutions(g, limit = 2) {
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (g[r][c] === 0) {
+            let total = 0;
+            for (let n = 1; n <= 9; n++) {
+              if (canPlace(g, r, c, n)) {
+                g[r][c] = n;
+                total += countSolutions(g, limit);
+                g[r][c] = 0;
+                if (total >= limit) return total;
+              }
+            }
+            return total;
+          }
+        }
+      }
+      return 1;
+    }
+
+    function generate(holes) {
+      const full = makeEmpty();
+      fillGrid(full);
+      solution = full.map((r) => r.slice());
+      const p = full.map((r) => r.slice());
+      const cells = shuffle([...Array(81).keys()]);
+      let removed = 0;
+      for (const idx of cells) {
+        if (removed >= holes) break;
+        const r = Math.floor(idx / 9), c = idx % 9;
+        const backup = p[r][c];
+        if (backup === 0) continue;
+        p[r][c] = 0;
+        const test = p.map((row) => row.slice());
+        if (countSolutions(test, 2) !== 1) {
+          p[r][c] = backup; // 破壞唯一解，還原
+        } else {
+          removed++;
+        }
+      }
+      puzzle = p;
+    }
+
+    function newGame() {
+      const holes = Number(document.getElementById("level").value);
+      generate(holes);
+      user = puzzle.map((r) => r.slice());
+      given = puzzle.map((r) => r.map((v) => v !== 0));
+      sel = -1; solved = false;
+      startTimer();
+      render();
+    }
+
+    function startTimer() {
+      if (timerId) clearInterval(timerId);
+      timer = 0; timerEl.textContent = "00:00";
+      timerId = setInterval(() => { timer++; timerEl.textContent = formatTime(timer); }, 1000);
+    }
+
+    function place(n) {
+      if (solved || sel < 0) return;
+      const r = Math.floor(sel / 9), c = sel % 9;
+      if (given[r][c]) return;
+      user[r][c] = n;
+      render();
+      checkWin();
+    }
+
+    function checkWin() {
+      for (let r = 0; r < 9; r++)
+        for (let c = 0; c < 9; c++)
+          if (user[r][c] !== solution[r][c]) return;
+      solved = true;
+      clearInterval(timerId);
+      const isBest = Scores.submit("sudoku_" + document.getElementById("level").value, timer, "min");
+      showOverlay({ title: "🎉 完成！", message: `用時 ${formatTime(timer)}${isBest ? "・新紀錄！" : ""}`, onButton: newGame });
+    }
+
+    function render() {
+      boardEl.innerHTML = "";
+      const selR = sel >= 0 ? Math.floor(sel / 9) : -1;
+      const selC = sel >= 0 ? sel % 9 : -1;
+      const selVal = sel >= 0 ? user[selR][selC] : 0;
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          const idx = r * 9 + c;
+          const el = document.createElement("div");
+          el.className = "sdk-cell";
+          if ((r === 2 || r === 5)) el.classList.add("rowsep");
+          const v = user[r][c];
+          if (given[r][c]) el.classList.add("given");
+          else if (v !== 0) el.classList.add("user");
+          if (idx === sel) el.classList.add("sel");
+          else if (selR === r || selC === c || (Math.floor(selR / 3) === Math.floor(r / 3) && Math.floor(selC / 3) === Math.floor(c / 3)))
+            el.classList.add("peer");
+          if (v !== 0 && selVal !== 0 && v === selVal && idx !== sel) el.classList.add("same");
+          // 標紅衝突
+          if (v !== 0 && !given[r][c] && hasConflict(r, c, v)) el.classList.add("bad");
+          el.textContent = v === 0 ? "" : v;
+          el.addEventListener("click", () => { sel = idx; render(); });
+          boardEl.appendChild(el);
+        }
+      }
+    }
+
+    function hasConflict(r, c, n) {
+      for (let i = 0; i < 9; i++) {
+        if (i !== c && user[r][i] === n) return true;
+        if (i !== r && user[i][c] === n) return true;
+      }
+      const br = Math.floor(r / 3) * 3, bc = Math.floor(c / 3) * 3;
+      for (let dr = 0; dr < 3; dr++)
+        for (let dc = 0; dc < 3; dc++) {
+          const rr = br + dr, cc = bc + dc;
+          if ((rr !== r || cc !== c) && user[rr][cc] === n) return true;
+        }
+      return false;
+    }
+
+    // 數字鍵盤
+    const numpad = document.getElementById("numpad");
+    for (let n = 1; n <= 9; n++) {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.textContent = n;
+      b.addEventListener("click", () => place(n));
+      numpad.appendChild(b);
+    }
+    const clr = document.createElement("button");
+    clr.className = "btn";
+    clr.textContent = "✕";
+    clr.addEventListener("click", () => place(0));
+    numpad.appendChild(clr);
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key >= "1" && e.key <= "9") place(Number(e.key));
+      else if (e.key === "0" || e.key === "Backspace" || e.key === "Delete") place(0);
+      else if (sel >= 0) {
+        let r = Math.floor(sel / 9), c = sel % 9;
+        if (e.key === "ArrowUp") r = Math.max(0, r - 1);
+        else if (e.key === "ArrowDown") r = Math.min(8, r + 1);
+        else if (e.key === "ArrowLeft") c = Math.max(0, c - 1);
+        else if (e.key === "ArrowRight") c = Math.min(8, c + 1);
+        else return;
+        sel = r * 9 + c; render(); e.preventDefault();
+      }
+    });
+
+    document.getElementById("newBtn").addEventListener("click", newGame);
+    document.getElementById("checkBtn").addEventListener("click", () => {
+      let wrong = 0;
+      for (let r = 0; r < 9; r++)
+        for (let c = 0; c < 9; c++)
+          if (user[r][c] !== 0 && user[r][c] !== solution[r][c]) wrong++;
+      toast(wrong === 0 ? "目前沒有錯誤 👍" : `有 ${wrong} 格填錯`);
+    });
+    document.getElementById("solveBtn").addEventListener("click", () => {
+      user = solution.map((r) => r.slice());
+      solved = true;
+      clearInterval(timerId);
+      render();
+    });
+
+    newGame();
+  </script>
+</body>
+</html>

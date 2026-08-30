@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>踩地雷</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    .ms-board {
+      display: grid;
+      gap: 2px;
+      background: var(--border);
+      padding: 2px;
+      border-radius: 8px;
+      user-select: none;
+      touch-action: manipulation;
+    }
+    .ms-cell {
+      width: 42px;
+      height: 42px;
+      background: var(--card-hover);
+      border: none;
+      border-radius: 4px;
+      font-size: 22px;
+      font-weight: 700;
+      display: grid;
+      place-items: center;
+      color: var(--text);
+      transition: background 0.1s;
+    }
+    .ms-cell:hover:not(.revealed) { background: var(--accent-2); }
+    .ms-cell.revealed { background: var(--bg-soft); cursor: default; }
+    .ms-cell.mine { background: var(--danger); }
+    .ms-cell.exploded { background: #d63b57; box-shadow: 0 0 0 2px #a82640 inset; }
+    .ms-cell.flag { color: var(--warning); }
+    .n1 { color: #6ea8ff; } .n2 { color: #4dd07c; } .n3 { color: #ff7a90; }
+    .n4 { color: #b48cff; } .n5 { color: #ffb84d; } .n6 { color: #23d5ab; }
+    .n7 { color: #e8eaf6; } .n8 { color: #9aa0c3; }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <label>難度
+        <select id="level">
+          <option value="easy">簡單 9×9 / 10 雷</option>
+          <option value="medium" selected>中等 16×16 / 40 雷</option>
+          <option value="hard">困難 16×30 / 99 雷</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newBtn">新遊戲</button>
+      <span class="status">💣 剩餘 <b id="mineCount">0</b></span>
+      <span class="status">⏱ <b id="timer">00:00</b></span>
+    </div>
+    <div class="game-stage">
+      <div class="ms-board" id="board"></div>
+    </div>
+    <div class="hint">左鍵翻開，右鍵（或長按）插旗。第一次點擊保證不是地雷。</div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("💣 踩地雷");
+
+    const LEVELS = {
+      easy: { rows: 9, cols: 9, mines: 10 },
+      medium: { rows: 16, cols: 16, mines: 40 },
+      hard: { rows: 16, cols: 30, mines: 99 },
+    };
+
+    let rows, cols, mines;
+    let grid = [];          // {mine, revealed, flag, count}
+    let started = false;
+    let over = false;
+    let revealedCount = 0;
+    let flags = 0;
+    let timer = 0, timerId = null;
+
+    const boardEl = document.getElementById("board");
+    const mineCountEl = document.getElementById("mineCount");
+    const timerEl = document.getElementById("timer");
+
+    function startTimer() {
+      stopTimer();
+      timer = 0;
+      timerEl.textContent = "00:00";
+      timerId = setInterval(() => {
+        timer++;
+        timerEl.textContent = formatTime(timer);
+      }, 1000);
+    }
+    function stopTimer() { if (timerId) clearInterval(timerId); timerId = null; }
+
+    function newGame() {
+      const lv = LEVELS[document.getElementById("level").value];
+      rows = lv.rows; cols = lv.cols; mines = lv.mines;
+      grid = [];
+      for (let r = 0; r < rows; r++) {
+        const row = [];
+        for (let c = 0; c < cols; c++) row.push({ mine: false, revealed: false, flag: false, count: 0 });
+        grid.push(row);
+      }
+      started = false; over = false; revealedCount = 0; flags = 0;
+      stopTimer();
+      timerEl.textContent = "00:00";
+      mineCountEl.textContent = mines;
+      render();
+    }
+
+    function placeMines(safeR, safeC) {
+      let placed = 0;
+      while (placed < mines) {
+        const r = randInt(0, rows - 1), c = randInt(0, cols - 1);
+        if (grid[r][c].mine) continue;
+        if (Math.abs(r - safeR) <= 1 && Math.abs(c - safeC) <= 1) continue; // 首擊周圍淨空
+        grid[r][c].mine = true;
+        placed++;
+      }
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < cols; c++)
+          grid[r][c].count = neighbors(r, c).filter(([nr, nc]) => grid[nr][nc].mine).length;
+    }
+
+    function neighbors(r, c) {
+      const res = [];
+      for (let dr = -1; dr <= 1; dr++)
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) res.push([nr, nc]);
+        }
+      return res;
+    }
+
+    function reveal(r, c) {
+      const cell = grid[r][c];
+      if (cell.revealed || cell.flag) return;
+      cell.revealed = true;
+      revealedCount++;
+      if (cell.count === 0 && !cell.mine) {
+        neighbors(r, c).forEach(([nr, nc]) => reveal(nr, nc));
+      }
+    }
+
+    function onLeft(r, c) {
+      if (over) return;
+      const cell = grid[r][c];
+      if (cell.flag || cell.revealed) return;
+      if (!started) {
+        placeMines(r, c);
+        started = true;
+        startTimer();
+      }
+      if (cell.mine) {
+        over = true;
+        cell.exploded = true;
+        stopTimer();
+        revealAllMines();
+        render();
+        // 不彈窗、不霧化，直接停在失敗畫面。用 toast 輕提示。
+        toast("💥 踩到地雷了，按「新遊戲」重來", 2600);
+        return;
+      }
+      reveal(r, c);
+      render();
+      checkWin();
+    }
+
+    function onRight(r, c) {
+      if (over || !started && false) {}
+      if (over) return;
+      const cell = grid[r][c];
+      if (cell.revealed) return;
+      cell.flag = !cell.flag;
+      flags += cell.flag ? 1 : -1;
+      mineCountEl.textContent = mines - flags;
+      render();
+    }
+
+    function revealAllMines() {
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < cols; c++)
+          if (grid[r][c].mine) grid[r][c].revealed = true;
+    }
+
+    function checkWin() {
+      if (revealedCount === rows * cols - mines) {
+        over = true;
+        stopTimer();
+        const isBest = Scores.submit("minesweeper_" + document.getElementById("level").value, timer, "min");
+        showOverlay({
+          title: "🎉 清除完成！",
+          message: `用時 ${formatTime(timer)}${isBest ? "・新紀錄！" : ""}`,
+          onButton: newGame,
+        });
+      }
+    }
+
+    function render() {
+      boardEl.style.gridTemplateColumns = `repeat(${cols}, 42px)`;
+      boardEl.innerHTML = "";
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cell = grid[r][c];
+          const el = document.createElement("button");
+          el.className = "ms-cell";
+          if (cell.revealed) {
+            el.classList.add("revealed");
+            if (cell.mine) {
+              el.classList.add("mine");
+              if (cell.exploded) el.classList.add("exploded");
+              el.textContent = "💣";
+            }
+            else if (cell.count > 0) { el.textContent = cell.count; el.classList.add("n" + cell.count); }
+          } else if (cell.flag) {
+            el.classList.add("flag");
+            el.textContent = "🚩";
+          }
+          el.addEventListener("click", () => onLeft(r, c));
+          el.addEventListener("contextmenu", (e) => { e.preventDefault(); onRight(r, c); });
+          // 手機長按插旗
+          let pressTimer = null;
+          el.addEventListener("touchstart", (e) => {
+            pressTimer = setTimeout(() => { onRight(r, c); pressTimer = null; }, 400);
+          }, { passive: true });
+          el.addEventListener("touchend", () => { if (pressTimer) { clearTimeout(pressTimer); } });
+          boardEl.appendChild(el);
+        }
+      }
+    }
+
+    document.getElementById("newBtn").addEventListener("click", newGame);
+    document.getElementById("level").addEventListener("change", newGame);
+    newGame();
+  </script>
+</body>
+</html>

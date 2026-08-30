@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>記憶翻牌</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    .mem-board { display: grid; gap: 10px; }
+    .card {
+      aspect-ratio: 1 / 1;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      perspective: 600px;
+    }
+    .card .inner {
+      position: relative; width: 100%; height: 100%;
+      transition: transform 0.35s; transform-style: preserve-3d;
+    }
+    .card.flipped .inner, .card.matched .inner { transform: rotateY(180deg); }
+    .face {
+      position: absolute; inset: 0;
+      display: grid; place-items: center;
+      border-radius: 12px; backface-visibility: hidden;
+      font-size: 34px;
+    }
+    .front {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff; font-size: 30px;
+      box-shadow: inset 0 0 0 2px rgba(255,255,255,0.35);
+    }
+    .back {
+      background: #fff;
+      border: 2px solid var(--accent-2);
+      transform: rotateY(180deg);
+      box-shadow: 0 4px 12px rgba(255, 150, 110, 0.18);
+    }
+    .card.matched .back { border-color: var(--good); box-shadow: 0 0 0 3px var(--good) inset; }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <label>難度
+        <select id="level">
+          <option value="4">4 × 4</option>
+          <option value="6" selected>6 × 4</option>
+          <option value="6x6">6 × 6</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newBtn">新遊戲</button>
+      <span class="status">步數 <b id="moves">0</b></span>
+      <span class="status">⏱ <b id="timer">00:00</b></span>
+      <span class="status">最少步數 <b id="best">-</b></span>
+    </div>
+    <div class="game-stage">
+      <div class="mem-board" id="board"></div>
+    </div>
+    <div class="hint">翻開兩張牌，配對相同的圖案。全部配對成功即完成。</div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("🃏 記憶翻牌");
+
+    const EMOJIS = ["🍎","🍌","🍇","🍓","🍑","🍉","🥝","🍒","🥥","🍍","🥕","🌽","🍄","🌶️","🥑","🍆","🫐","🍋"];
+    let cols, rows, deck, first = null, lock = false, moves = 0, matched = 0;
+    let timer = 0, timerId = null, started = false;
+
+    const boardEl = document.getElementById("board");
+    const movesEl = document.getElementById("moves");
+    const timerEl = document.getElementById("timer");
+    const bestEl = document.getElementById("best");
+
+    function dims() {
+      const v = document.getElementById("level").value;
+      if (v === "4") return [4, 4];
+      if (v === "6x6") return [6, 6];
+      return [6, 4]; // 6 欄 4 列
+    }
+
+    function newGame() {
+      [cols, rows] = dims();
+      const pairCount = (cols * rows) / 2;
+      const chosen = shuffle(EMOJIS).slice(0, pairCount);
+      deck = shuffle([...chosen, ...chosen]).map((e, i) => ({ id: i, emoji: e, matched: false }));
+      first = null; lock = false; moves = 0; matched = 0; started = false;
+      movesEl.textContent = 0;
+      timer = 0; timerEl.textContent = "00:00";
+      if (timerId) clearInterval(timerId);
+      bestEl.textContent = Scores.getBest("memory_" + document.getElementById("level").value) ?? "-";
+      render();
+    }
+
+    function startTimer() {
+      if (started) return;
+      started = true;
+      timerId = setInterval(() => { timer++; timerEl.textContent = formatTime(timer); }, 1000);
+    }
+
+    function flip(idx, cardEl) {
+      if (lock || deck[idx].matched) return;
+      if (first === idx) return;
+      startTimer();
+      cardEl.classList.add("flipped");
+      if (first === null) {
+        first = idx;
+        return;
+      }
+      moves++;
+      movesEl.textContent = moves;
+      if (deck[first].emoji === deck[idx].emoji) {
+        deck[first].matched = deck[idx].matched = true;
+        matched += 2;
+        markMatched();
+        first = null;
+        if (matched === deck.length) win();
+      } else {
+        lock = true;
+        const prev = first;
+        setTimeout(() => {
+          document.querySelectorAll(".card").forEach((c) => {
+            const i = Number(c.dataset.idx);
+            if (i === prev || i === idx) c.classList.remove("flipped");
+          });
+          first = null; lock = false;
+        }, 700);
+      }
+    }
+
+    function markMatched() {
+      document.querySelectorAll(".card").forEach((c) => {
+        if (deck[Number(c.dataset.idx)].matched) c.classList.add("matched");
+      });
+    }
+
+    function win() {
+      clearInterval(timerId);
+      const key = "memory_" + document.getElementById("level").value;
+      const isBest = Scores.submit(key, moves, "min");
+      bestEl.textContent = Scores.getBest(key);
+      showOverlay({ title: "🎉 全部配對！", message: `步數 ${moves}・用時 ${formatTime(timer)}${isBest ? "・最佳！" : ""}`, onButton: newGame });
+    }
+
+    function render() {
+      boardEl.style.gridTemplateColumns = `repeat(${cols}, 92px)`;
+      boardEl.innerHTML = "";
+      deck.forEach((card, idx) => {
+        const el = document.createElement("button");
+        el.className = "card";
+        el.dataset.idx = idx;
+        el.innerHTML = `
+          <div class="inner">
+            <div class="face front">?</div>
+            <div class="face back">${card.emoji}</div>
+          </div>`;
+        el.addEventListener("click", () => flip(idx, el));
+        boardEl.appendChild(el);
+      });
+    }
+
+    document.getElementById("newBtn").addEventListener("click", newGame);
+    document.getElementById("level").addEventListener("change", newGame);
+    newGame();
+  </script>
+</body>
+</html>

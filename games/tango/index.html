@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tango</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    .tg-wrap { position: relative; }
+    .tg-board {
+      display: grid; gap: 0;
+      background: var(--border);
+      border: 2px solid var(--text-dim);
+      border-radius: 8px;
+      position: relative;
+      user-select: none;
+    }
+    .tg-cell {
+      width: 66px; height: 66px;
+      background: #fff;
+      border: 1px solid var(--border);
+      display: grid; place-items: center;
+      font-size: 36px; cursor: pointer;
+      position: relative;
+    }
+    /* 給定格：淺灰底、不可點 */
+    .tg-cell.given { background: #efe6df; cursor: not-allowed; }
+    /* 違規格：明顯紅底 + 紅框，跟給定格與一般格清楚區分 */
+    .tg-cell.bad {
+      background: #ffd2d2;
+      box-shadow: inset 0 0 0 3px var(--danger);
+    }
+    /* 約束符號 */
+    .constraint {
+      position: absolute; z-index: 5;
+      background: var(--card); color: var(--text);
+      font-size: 13px; font-weight: 700;
+      width: 20px; height: 20px; border-radius: 50%;
+      display: grid; place-items: center;
+      border: 1px solid var(--text-dim);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <label>大小
+        <select id="size">
+          <option value="4">4 × 4</option>
+          <option value="6" selected>6 × 6</option>
+        </select>
+      </label>
+      <button class="btn btn-primary" id="newBtn">新謎題</button>
+      <button class="btn" id="clearBtn">清空</button>
+      <span class="status" id="msg">點格子切換 🌙 / ☀️</span>
+    </div>
+    <div class="game-stage">
+      <div class="tg-wrap"><div class="tg-board" id="board"></div></div>
+    </div>
+    <div class="hint">
+      規則：每行、每列的 🌙 和 ☀️ 數量相等；<b>不可有連續三個相同</b>；<br />
+      <b>=</b> 表示兩格相同，<b>×</b> 表示兩格不同。點格子循環：空 → 🌙 → ☀️ → 空。
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("🌙 Tango");
+
+    const SUN = 1, MOON = 2;
+    const SYM = { 0: "", 1: "☀️", 2: "🌙" };
+    let N, sol, state, given, cons; // cons: [{r1,c1,r2,c2,type:'eq'|'ne'}]
+    const boardEl = document.getElementById("board");
+
+    // ---- 產生完整合法解（每行列各半、無三連） ----
+    function genSolution(n) {
+      const g = Array.from({ length: n }, () => Array(n).fill(0));
+      function valid(r, c, v) {
+        // 無三連（水平）
+        if (c >= 2 && g[r][c - 1] === v && g[r][c - 2] === v) return false;
+        // 無三連（垂直）
+        if (r >= 2 && g[r - 1][c] === v && g[r - 2][c] === v) return false;
+        // 每列不超過 n/2
+        let rowCount = 0; for (let i = 0; i < n; i++) if (g[r][i] === v) rowCount++;
+        if (rowCount >= n / 2) return false;
+        // 每欄不超過 n/2
+        let colCount = 0; for (let i = 0; i < n; i++) if (g[i][c] === v) colCount++;
+        if (colCount >= n / 2) return false;
+        return true;
+      }
+      function solve(idx) {
+        if (idx === n * n) return true;
+        const r = Math.floor(idx / n), c = idx % n;
+        for (const v of shuffle([SUN, MOON])) {
+          if (valid(r, c, v)) {
+            g[r][c] = v;
+            if (solve(idx + 1)) return true;
+            g[r][c] = 0;
+          }
+        }
+        return false;
+      }
+      solve(0);
+      return g;
+    }
+
+    function buildPuzzle(n) {
+      sol = genSolution(n);
+      // 產生一些約束（相鄰格）
+      cons = [];
+      const pairs = [];
+      for (let r = 0; r < n; r++)
+        for (let c = 0; c < n; c++) {
+          if (c + 1 < n) pairs.push([r, c, r, c + 1]);
+          if (r + 1 < n) pairs.push([r, c, r + 1, c]);
+        }
+      const chosen = shuffle(pairs).slice(0, Math.round(n * 1.3));
+      chosen.forEach(([r1, c1, r2, c2]) => {
+        cons.push({ r1, c1, r2, c2, type: sol[r1][c1] === sol[r2][c2] ? "eq" : "ne" });
+      });
+      // 給定一些提示格（約 25%），其餘留空
+      given = Array.from({ length: n }, () => Array(n).fill(false));
+      state = Array.from({ length: n }, () => Array(n).fill(0));
+      const cells = shuffle([...Array(n * n).keys()]);
+      const clueCount = Math.round(n * n * 0.28);
+      for (let i = 0; i < clueCount; i++) {
+        const r = Math.floor(cells[i] / n), c = cells[i] % n;
+        given[r][c] = true;
+        state[r][c] = sol[r][c];
+      }
+    }
+
+    function newGame() {
+      N = Number(document.getElementById("size").value);
+      buildPuzzle(N);
+      render();
+    }
+
+    function cycle(r, c) {
+      if (given[r][c]) return;
+      state[r][c] = (state[r][c] + 1) % 3; // 0->1(sun)->2(moon)->0
+      render();
+      checkWin();
+    }
+
+    function findBad() {
+      const bad = Array.from({ length: N }, () => Array(N).fill(false));
+      // 三連
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++) {
+          const v = state[r][c];
+          if (!v) continue;
+          if (c >= 2 && state[r][c - 1] === v && state[r][c - 2] === v) { bad[r][c] = bad[r][c-1] = bad[r][c-2] = true; }
+          if (r >= 2 && state[r - 1][c] === v && state[r - 2][c] === v) { bad[r][c] = bad[r-1][c] = bad[r-2][c] = true; }
+        }
+      // 每行/列超過半數
+      for (let r = 0; r < N; r++) {
+        let s = 0, m = 0;
+        for (let c = 0; c < N; c++) { if (state[r][c] === SUN) s++; else if (state[r][c] === MOON) m++; }
+        if (s > N / 2 || m > N / 2) for (let c = 0; c < N; c++) if (state[r][c]) bad[r][c] = true;
+      }
+      for (let c = 0; c < N; c++) {
+        let s = 0, m = 0;
+        for (let r = 0; r < N; r++) { if (state[r][c] === SUN) s++; else if (state[r][c] === MOON) m++; }
+        if (s > N / 2 || m > N / 2) for (let r = 0; r < N; r++) if (state[r][c]) bad[r][c] = true;
+      }
+      // 約束違反
+      cons.forEach((cn) => {
+        const a = state[cn.r1][cn.c1], b = state[cn.r2][cn.c2];
+        if (a && b) {
+          if (cn.type === "eq" && a !== b) { bad[cn.r1][cn.c1] = bad[cn.r2][cn.c2] = true; }
+          if (cn.type === "ne" && a === b) { bad[cn.r1][cn.c1] = bad[cn.r2][cn.c2] = true; }
+        }
+      });
+      return bad;
+    }
+
+    function checkWin() {
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++)
+          if (state[r][c] === 0) return;
+      const bad = findBad();
+      if (bad.some((row) => row.some((v) => v))) return;
+      showOverlay({ title: "🎉 完成！", message: "所有規則都滿足", buttonText: "下一題", onButton: newGame });
+    }
+
+    function render() {
+      const bad = findBad();
+      boardEl.style.gridTemplateColumns = `repeat(${N}, 66px)`;
+      boardEl.innerHTML = "";
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++) {
+          const el = document.createElement("div");
+          el.className = "tg-cell";
+          if (given[r][c]) el.classList.add("given");
+          if (bad[r][c]) el.classList.add("bad");
+          el.textContent = SYM[state[r][c]];
+          el.addEventListener("click", () => cycle(r, c));
+          boardEl.appendChild(el);
+        }
+      // 疊上約束符號（用絕對定位）
+      const cell = 66;
+      cons.forEach((cn) => {
+        const el = document.createElement("div");
+        el.className = "constraint";
+        el.textContent = cn.type === "eq" ? "=" : "×";
+        const midX = ((cn.c1 + cn.c2) / 2 + 0.5) * cell + 2;
+        const midY = ((cn.r1 + cn.r2) / 2 + 0.5) * cell + 2;
+        el.style.left = midX + "px";
+        el.style.top = midY + "px";
+        boardEl.appendChild(el);
+      });
+    }
+
+    document.getElementById("newBtn").addEventListener("click", newGame);
+    document.getElementById("size").addEventListener("change", newGame);
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      for (let r = 0; r < N; r++)
+        for (let c = 0; c < N; c++)
+          if (!given[r][c]) state[r][c] = 0;
+      render();
+    });
+
+    newGame();
+  </script>
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>遊戲空間</title>
+  <link rel="stylesheet" href="css/common.css" />
+  <style>
+    /* ===== 登入閘門 ===== */
+    .gate-wrap {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .gate-card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 34px 30px;
+      box-shadow: var(--shadow);
+      text-align: center;
+    }
+
+    .gate-logo {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 16px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid;
+      place-items: center;
+      font-size: 32px;
+    }
+
+    .gate-card h1 {
+      font-size: 22px;
+      margin-bottom: 6px;
+    }
+
+    .gate-card p {
+      color: var(--text-dim);
+      font-size: 14px;
+      margin-bottom: 22px;
+    }
+
+    .gate-card input {
+      width: 100%;
+      font-size: 16px;
+      margin-bottom: 14px;
+    }
+
+    .gate-card .btn-primary {
+      width: 100%;
+    }
+
+    .gate-err {
+      color: var(--danger);
+      font-size: 13px;
+      min-height: 18px;
+      margin-bottom: 8px;
+    }
+
+    /* ===== 大廳 ===== */
+    #lobby {
+      display: none;
+    }
+
+    .lobby-hero {
+      padding: 30px 0 10px;
+    }
+
+    .lobby-hero h1 {
+      font-size: 30px;
+      margin-bottom: 6px;
+    }
+
+    .lobby-hero p {
+      color: var(--text-dim);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .game-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 148px;
+    }
+
+    .game-card:hover {
+      transform: translateY(-4px);
+      background: var(--card-hover);
+      border-color: var(--accent);
+    }
+
+    .game-card .emoji {
+      font-size: 34px;
+    }
+
+    .game-card .name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .game-card .desc {
+      color: var(--text-dim);
+      font-size: 13px;
+      line-height: 1.5;
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <!-- 登入閘門（Firebase Auth）-->
+  <div class="gate-wrap" id="gate" style="display:none">
+    <div class="gate-card">
+      <div class="gate-logo">🎮</div>
+      <h1>遊戲空間</h1>
+      <p>私人遊戲室・請登入</p>
+      <div class="gate-err" id="gateErr"></div>
+      <input type="email" id="gateEmail" placeholder="電子郵件" autocomplete="username" autofocus />
+      <input type="password" id="gatePwd" placeholder="密碼" autocomplete="current-password" />
+      <button class="btn btn-primary" id="gateBtn">登入</button>
+    </div>
+  </div>
+
+  <!-- 大廳 -->
+  <div id="lobby">
+    <div class="topbar">
+      <div class="brand"><span class="logo">🎮</span> 遊戲空間</div>
+      <button class="btn btn-ghost" id="lockBtn">登出</button>
+    </div>
+    <div class="container">
+      <div class="lobby-hero">
+        <h1>選一個遊戲</h1>
+        <p>11 款遊戲，隨你玩。</p>
+      </div>
+      <div class="grid" id="gameGrid"></div>
+    </div>
+  </div>
+
+  <!-- Firebase SDK（compat 版，直接用 script 載入，不需打包工具）-->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/common.js"></script>
+  <script>
+    const GAMES = [
+      { id: "minesweeper", emoji: "💣", name: "踩地雷", desc: "翻開所有安全格，避開地雷。" },
+      { id: "queens", emoji: "👑", name: "Queens", desc: "每行、列、顏色區各放一個皇冠，且不相鄰。" },
+      { id: "sudoku", emoji: "🔢", name: "數獨", desc: "每行、列、九宮格填入 1–9 不重複。" },
+      { id: "snake", emoji: "🐍", name: "貪食蛇", desc: "吃食物變長，別撞到牆或自己。" },
+      { id: "tetris", emoji: "🧱", name: "俄羅斯方塊", desc: "堆疊方塊消除整行。" },
+      { id: "nonogram", emoji: "🎨", name: "數格子", desc: "依行列數字推理，塗出正確圖案。" },
+      { id: "memory", emoji: "🃏", name: "記憶翻牌", desc: "翻開並配對相同的牌。" },
+      { id: "tango", emoji: "🌙", name: "Tango", desc: "月亮與太陽各半，不可連續三個相同。" },
+      { id: "breakout", emoji: "🧊", name: "打磚塊", desc: "用球拍反彈球，打掉所有磚塊。" },
+      { id: "bubble", emoji: "🫧", name: "泡泡龍", desc: "發射泡泡，三個同色以上消除。" },
+      { id: "stairs", emoji: "🧍", name: "小朋友下樓梯", desc: "踩著踏板往下走，別碰到天花板尖刺。" },
+    ];
+
+    const gate = document.getElementById("gate");
+    const lobby = document.getElementById("lobby");
+    const emailInput = document.getElementById("gateEmail");
+    const pwd = document.getElementById("gatePwd");
+    const err = document.getElementById("gateErr");
+    const gateBtn = document.getElementById("gateBtn");
+
+    function showGate() {
+      gate.style.display = "grid";
+      lobby.style.display = "none";
+    }
+
+    function enterLobby() {
+      gate.style.display = "none";
+      lobby.style.display = "block";
+      renderGrid();
+    }
+
+    async function tryUnlock() {
+      const email = emailInput.value.trim();
+      const password = pwd.value;
+      if (!email || !password) {
+        err.textContent = "請輸入電子郵件與密碼";
+        return;
+      }
+      gateBtn.disabled = true;
+      err.textContent = "登入中…";
+      try {
+        await Auth.signIn(email, password);
+        err.textContent = "";
+        // 登入成功後由 onChange 監聽器切換到大廳
+      } catch (e) {
+        err.textContent = Auth.errorMessage(e);
+        pwd.value = "";
+        pwd.focus();
+      } finally {
+        gateBtn.disabled = false;
+      }
+    }
+
+    gateBtn.addEventListener("click", tryUnlock);
+    pwd.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") tryUnlock();
+    });
+    emailInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") pwd.focus();
+    });
+
+    document.getElementById("lockBtn").addEventListener("click", async () => {
+      await Auth.signOut();
+      // 登出後由 onChange 監聽器切回登入頁
+    });
+
+    // 依 Firebase 登入狀態切換畫面（重新整理後也能自動還原）
+    Auth.onChange((user) => {
+      if (user) enterLobby();
+      else showGate();
+    });
+
+    function renderGrid() {
+      const grid = document.getElementById("gameGrid");
+      grid.innerHTML = "";
+      GAMES.forEach((g) => {
+        const a = document.createElement("a");
+        a.className = "game-card";
+        a.href = `games/${g.id}/index.html`;
+        a.innerHTML = `
+          <div class="emoji">${g.emoji}</div>
+          <div class="name">${g.name}</div>
+          <div class="desc">${g.desc}</div>`;
+        grid.appendChild(a);
+      });
+    }
+  </script>
+</body>
+</html>

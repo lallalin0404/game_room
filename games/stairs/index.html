@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小朋友下樓梯</title>
+  <link rel="stylesheet" href="../../css/common.css" />
+  <style>
+    canvas { background: #0c0f1e; border-radius: 12px; display: block; touch-action: none; }
+    .dpad {
+      display: grid; grid-template-columns: repeat(2, 84px); gap: 12px;
+      margin-top: 16px; justify-content: center;
+    }
+    .dpad button { font-size: 22px; padding: 16px 0; }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="game-toolbar">
+      <button class="btn btn-primary" id="startBtn">開始</button>
+      <span class="status">深度 <b id="score">0</b></span>
+      <span class="status">生命 <b id="hp">100</b></span>
+      <span class="status">最深 <b id="best">0</b></span>
+    </div>
+    <div class="game-stage" style="flex-direction:column; align-items:center;">
+      <canvas id="cv" width="460" height="660"></canvas>
+      <div class="dpad">
+        <button class="btn" id="leftBtn">◀</button>
+        <button class="btn" id="rightBtn">▶</button>
+      </div>
+    </div>
+    <div class="hint">
+      ← → 或下方按鍵左右移動，踩著踏板一路往下。碰到頂端尖刺會扣血，紅色踏板有刺會受傷，掉太久也會扣血。撐得越深越好。
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="../../js/firebase-config.js"></script>
+  <script src="../../js/auth.js"></script>
+  <script src="../../js/common.js"></script>
+  <script src="../../js/gameshell.js"></script>
+  <script>
+    mountGameHeader("🧍 小朋友下樓梯");
+
+    const cv = document.getElementById("cv");
+    const ctx = cv.getContext("2d");
+    const W = cv.width, H = cv.height;
+    const SPIKE_H = 24;      // 頂端尖刺高度
+    const FLOOR_H = 12;
+    const SCROLL = 1.1;      // 畫面上捲速度
+
+    let player, platforms, score, hp, running, raf;
+    let moveDir = 0;
+    const scoreEl = document.getElementById("score");
+    const hpEl = document.getElementById("hp");
+    const bestEl = document.getElementById("best");
+    bestEl.textContent = Scores.getBest("stairs") ?? 0;
+
+    function makePlatform(y) {
+      const w = randInt(60, 100);
+      const x = randInt(0, W - w);
+      // 種類：normal 一般, spike 有刺(扣血), spring 彈跳
+      const roll = Math.random();
+      let type = "normal";
+      if (roll < 0.18) type = "spike";
+      else if (roll < 0.30) type = "spring";
+      return { x, y, w, type };
+    }
+
+    function newGame() {
+      player = { x: W / 2 - 12, y: 80, w: 24, h: 26, vy: 0, onGround: false };
+      platforms = [];
+      let y = 180;
+      while (y < H + 100) { platforms.push(makePlatform(y)); y += randInt(70, 100); }
+      score = 0; hp = 100;
+      scoreEl.textContent = 0; hpEl.textContent = 100;
+      running = true;
+      cancelAnimationFrame(raf);
+      loop();
+    }
+
+    function loop() {
+      if (!running) return;
+      update();
+      draw();
+      raf = requestAnimationFrame(loop);
+    }
+
+    function update() {
+      // 水平移動
+      player.x += moveDir * 4.2;
+      if (player.x < 0) player.x = 0;
+      if (player.x + player.w > W) player.x = W - player.w;
+
+      // 重力
+      player.vy += 0.55;
+      if (player.vy > 9) player.vy = 9;
+      player.y += player.vy;
+
+      // 畫面上捲（玩家隨之相對上移，平台往上移代表往下走）
+      const scroll = SCROLL;
+      platforms.forEach((p) => (p.y -= scroll));
+      player.y -= scroll;
+      score += 0.02 * 60 / 60; // 累積深度
+
+      // 平台碰撞（只在下落時踩上去）
+      player.onGround = false;
+      if (player.vy > 0) {
+        for (const p of platforms) {
+          if (player.x + player.w > p.x && player.x < p.x + p.w &&
+              player.y + player.h >= p.y && player.y + player.h <= p.y + FLOOR_H + player.vy) {
+            player.y = p.y - player.h;
+            player.onGround = true;
+            if (p.type === "spring") {
+              player.vy = -11; // 彈跳
+            } else {
+              player.vy = 0;
+              if (p.type === "spike" && !p.hurtCooldown) {
+                hp -= 20;
+                p.hurtCooldown = 60;
+                flashHurt();
+              }
+            }
+            break;
+          }
+        }
+      }
+      platforms.forEach((p) => { if (p.hurtCooldown) p.hurtCooldown--; });
+
+      // 頂端尖刺：玩家被推到最上方就扣血
+      if (player.y < SPIKE_H) {
+        player.y = SPIKE_H;
+        hp -= 0.6;
+      }
+      // 掉出底部
+      if (player.y > H) {
+        hp -= 1.2; // 持續往下超出畫面（很少發生，因為會被平台接住）
+        player.y = H;
+      }
+
+      // 移除離開畫面的平台，補新平台
+      platforms = platforms.filter((p) => p.y > -30);
+      let lowest = Math.max(...platforms.map((p) => p.y), 0);
+      while (lowest < H + 100) {
+        lowest += randInt(70, 100);
+        platforms.push(makePlatform(lowest));
+      }
+
+      hp = Math.max(0, hp);
+      scoreEl.textContent = Math.floor(score);
+      hpEl.textContent = Math.ceil(hp);
+      if (hp <= 0) endGame();
+    }
+
+    let hurtFlash = 0;
+    function flashHurt() { hurtFlash = 8; }
+
+    function draw() {
+      ctx.fillStyle = "#0c0f1e";
+      ctx.fillRect(0, 0, W, H);
+
+      // 頂端尖刺帶
+      ctx.fillStyle = "#ff5c7c";
+      for (let x = 0; x < W; x += 20) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x + 10, SPIKE_H);
+        ctx.lineTo(x + 20, 0);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // 平台
+      platforms.forEach((p) => {
+        if (p.type === "spike") ctx.fillStyle = "#ff7a90";
+        else if (p.type === "spring") ctx.fillStyle = "#23d5ab";
+        else ctx.fillStyle = "#6ea8ff";
+        ctx.fillRect(p.x, p.y, p.w, FLOOR_H);
+        if (p.type === "spike") {
+          ctx.fillStyle = "#ffd0d8";
+          for (let sx = p.x + 4; sx < p.x + p.w - 4; sx += 10) {
+            ctx.beginPath();
+            ctx.moveTo(sx, p.y);
+            ctx.lineTo(sx + 5, p.y - 8);
+            ctx.lineTo(sx + 10, p.y);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      });
+
+      // 玩家
+      ctx.fillStyle = hurtFlash > 0 ? "#ff5c7c" : "#ffb84d";
+      if (hurtFlash > 0) hurtFlash--;
+      roundRect(player.x, player.y, player.w, player.h, 6);
+      // 臉
+      ctx.fillStyle = "#0c0f1e";
+      ctx.fillRect(player.x + 5, player.y + 8, 4, 4);
+      ctx.fillRect(player.x + player.w - 9, player.y + 8, 4, 4);
+    }
+
+    function roundRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.fill();
+    }
+
+    function endGame() {
+      running = false;
+      const depth = Math.floor(score);
+      const isBest = Scores.submit("stairs", depth, "max");
+      bestEl.textContent = Scores.getBest("stairs");
+      showOverlay({ title: "💀 結束", message: `深度 ${depth}${isBest ? "・新紀錄！" : ""}`, buttonText: "再玩一次", onButton: newGame });
+    }
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") moveDir = -1;
+      else if (e.key === "ArrowRight") moveDir = 1;
+    });
+    document.addEventListener("keyup", (e) => {
+      if ((e.key === "ArrowLeft" && moveDir === -1) || (e.key === "ArrowRight" && moveDir === 1)) moveDir = 0;
+    });
+    const bindHold = (el, dir) => {
+      const down = (e) => { moveDir = dir; e.preventDefault(); };
+      const up = () => { if (moveDir === dir) moveDir = 0; };
+      el.addEventListener("mousedown", down);
+      el.addEventListener("touchstart", down, { passive: false });
+      el.addEventListener("mouseup", up);
+      el.addEventListener("mouseleave", up);
+      el.addEventListener("touchend", up);
+    };
+    bindHold(document.getElementById("leftBtn"), -1);
+    bindHold(document.getElementById("rightBtn"), 1);
+
+    document.getElementById("startBtn").addEventListener("click", newGame);
+
+    // 初始靜態畫面
+    newGame();
+    running = false;
+    cancelAnimationFrame(raf);
+    draw();
+  </script>
+</body>
+</html>
